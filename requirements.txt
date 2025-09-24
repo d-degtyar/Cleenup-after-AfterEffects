@@ -1,0 +1,16 @@
+# After Effects Cleanup Tool Requirements
+# Залежності для інструменту очистки проектів After Effects
+
+# Основні залежності (входять в стандартну бібліотеку Python)
+# tkinter - для GUI (вбудований в Python)
+# os, re, shutil, threading, logging, datetime, pathlib, json - стандартні модулі
+
+# Додаткові залежності (якщо потрібні)
+# Наразі проект використовує тільки стандартні модулі Python
+
+# Для розробки та тестування (опціонально):
+# pytest>=6.0.0
+# black>=21.0.0
+# flake8>=3.8.0
+
+# Мінімальна версія Python: 3.7+
