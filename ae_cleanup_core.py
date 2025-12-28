@@ -408,90 +408,66 @@ class AECleanupCore:
             return False
     
     def _delete_sequence(self, sequence: SequenceInfo, dry_run: bool) -> bool:
-        """Видалення секвенції файлів"""
+        """Видалення секвенції файлів (видалення цілої папки)"""
+        folder_path = Path(sequence.folder_path)
+        
         if dry_run:
-            self.logger.info(f"[DRY RUN] Видалення секвенції: {sequence.folder_path}")
+            self.logger.info(f"[DRY RUN] Видалення папки секвенції: {folder_path}")
             return True
         
         try:
-            # Отримуємо всі файли секвенції
-            sequence_files = self.sequence_parser.get_sequence_files(sequence)
-            auxiliary_files = self.sequence_parser.get_auxiliary_files(sequence)
+            if not folder_path.exists():
+                self.logger.warning(f"Папка секвенції не існує: {folder_path}")
+                return False
             
-            # Видаляємо файли секвенції
-            for file_path in sequence_files:
-                try:
-                    os.remove(file_path)
-                except Exception as e:
-                    self.logger.warning(f"Помилка видалення файлу секвенції {file_path}: {e}")
-            
-            # Видаляємо допоміжні файли
-            for file_path in auxiliary_files:
-                try:
-                    if os.path.isfile(file_path):
-                        os.remove(file_path)
-                    elif os.path.isdir(file_path):
-                        shutil.rmtree(file_path)
-                except Exception as e:
-                    self.logger.warning(f"Помилка видалення допоміжного файлу {file_path}: {e}")
-            
-            # Спробуємо видалити папку якщо вона порожня
-            try:
-                folder_path = Path(sequence.folder_path)
-                if folder_path.exists() and not any(folder_path.iterdir()):
-                    folder_path.rmdir()
-                    self.logger.info(f"Видалено порожню папку: {folder_path}")
-            except Exception:
-                pass  # Папка не порожня або інша помилка
-            
-            self.logger.info(f"Видалено секвенцію: {sequence.name}")
+            # Видаляємо всю папку з усім вмістом
+            shutil.rmtree(folder_path)
+            self.logger.info(f"Видалено папку секвенції: {folder_path}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Помилка видалення секвенції {sequence.name}: {e}")
+            self.logger.error(f"Помилка видалення папки секвенції {sequence.name}: {e}")
             return False
     
     def _move_sequence(self, sequence: SequenceInfo, target_folder: str, dry_run: bool) -> bool:
-        """Переміщення секвенції файлів"""
+        """Переміщення секвенції файлів (переміщення цілої папки)"""
         if not target_folder:
             self.logger.error("Не вказано цільову папку для переміщення")
             return False
         
-        # Створюємо підпапку для секвенції
-        sequence_folder_name = Path(sequence.folder_path).name
-        target_sequence_folder = os.path.join(target_folder, sequence_folder_name)
+        source_folder = Path(sequence.folder_path)
+        dest_path = Path(target_folder)
         
         if dry_run:
-            self.logger.info(f"[DRY RUN] Переміщення секвенції: {sequence.folder_path} -> {target_sequence_folder}")
+            self.logger.info(f"[DRY RUN] Переміщення папки секвенції: {source_folder} -> {dest_path}")
             return True
         
         try:
-            os.makedirs(target_sequence_folder, exist_ok=True)
+            if not source_folder.exists():
+                self.logger.warning(f"Папка секвенції не існує: {source_folder}")
+                return False
             
-            # Переміщуємо всі файли секвенції
-            sequence_files = self.sequence_parser.get_sequence_files(sequence)
-            auxiliary_files = self.sequence_parser.get_auxiliary_files(sequence)
+            # Створюємо папку призначення якщо не існує
+            dest_path.mkdir(parents=True, exist_ok=True)
             
-            all_files = sequence_files + auxiliary_files
+            # Визначаємо шлях для переміщеної папки
+            dest_sequence_folder = dest_path / source_folder.name
             
-            for file_path in all_files:
-                try:
-                    file_name = os.path.basename(file_path)
-                    target_file_path = os.path.join(target_sequence_folder, file_name)
-                    
-                    if os.path.isfile(file_path):
-                        shutil.move(file_path, target_file_path)
-                    elif os.path.isdir(file_path):
-                        shutil.move(file_path, os.path.join(target_sequence_folder, file_name))
-                        
-                except Exception as e:
-                    self.logger.warning(f"Помилка переміщення файлу секвенції {file_path}: {e}")
+            # Якщо папка з таким ім'ям вже існує в місці призначення
+            if dest_sequence_folder.exists():
+                # Створюємо унікальне ім'я
+                counter = 1
+                while dest_sequence_folder.exists():
+                    dest_sequence_folder = dest_path / f"{source_folder.name}_{counter}"
+                    counter += 1
             
-            self.logger.info(f"Переміщено секвенцію: {sequence.name} -> {target_sequence_folder}")
+            # Переміщуємо всю папку
+            shutil.move(str(source_folder), str(dest_sequence_folder))
+            self.logger.info(f"Переміщено папку секвенції: {source_folder} -> {dest_sequence_folder}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Помилка переміщення секвенції {sequence.name}: {e}")
+            self.logger.error(f"Помилка переміщення папки секвенції {sequence.name}: {e}")
             return False
     
     def get_summary(self) -> Dict:

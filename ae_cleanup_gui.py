@@ -343,158 +343,74 @@ class AECleanupGUI:
         """Аналіз звіту в окремому потоці"""
         try:
             self.update_status("Аналіз звіту...")
+            self.update_progress(0)
             self.log_message("Початок аналізу звіту")
             
-            # Очищення попередніх результатів
-            self.files_to_process.clear()
-            self.sequences_to_process.clear()
+            # Очищення попередніх результатів в GUI
+            self.files_to_process = []
+            self.sequences_to_process = []
+            
+            # Використовуємо self.cleanup_core для правильного парсингу
+            # Це важливо, щоб execute_operation мала доступ до розпарсених файлів
             
             # Парсинг файлу звіту
-            self._parse_report_file()
+            success = self.cleanup_core.parse_report_file(
+                self.report_file_var.get(), 
+                progress_callback=self.update_progress
+            )
             
-            # Фільтрація файлів
-            self._apply_filters()
-            
-            # Показ результатів
-            self._show_analysis_results()
-            
-            self.update_status("Аналіз завершено")
-            self.log_message("Аналіз звіту завершено")
+            if success:
+                # Застосування фільтрів через Core
+                self.update_progress(75)
+                self.log_message("Застосування фільтрів...")
+                
+                filters = {
+                    'excluded_extensions': self.extensions_var.get(),
+                    'min_file_size': self.min_file_size.get(),
+                    'max_file_size': self.max_file_size.get(),
+                    'process_sequences': self.process_sequences.get()
+                }
+                
+                self.cleanup_core.apply_filters(filters)
+                
+                # Конвертуємо результати в формат GUI для відображення
+                self.files_to_process = []
+                for file_info in self.cleanup_core.files_to_process:
+                    self.files_to_process.append({
+                        'path': file_info.path,
+                        'status': 'exists' if file_info.exists else 'missing',
+                        'size': file_info.size / (1024 * 1024) if file_info.size > 0 else 0  # MB
+                    })
+                
+                # Конвертуємо секвенції
+                self.sequences_to_process = []
+                for seq_info in self.cleanup_core.sequences_to_process:
+                    self.sequences_to_process.append({
+                        'name': seq_info.name,
+                        'pattern': seq_info.pattern,
+                        'folder': seq_info.folder_path,
+                        'file_count': seq_info.file_count,
+                        'auxiliary_count': seq_info.auxiliary_count,
+                        'start_frame': seq_info.start_frame,
+                        'end_frame': seq_info.end_frame,
+                        'extension': seq_info.extension
+                    })
+                
+                self.log_message(f"Після фільтрації залишилось {len(self.files_to_process)} файлів та {len(self.sequences_to_process)} секвенцій")
+                
+                # Показ результатів
+                self.update_progress(100)
+                self._show_analysis_results()
+                
+                self.update_status("Аналіз завершено")
+                self.log_message("Аналіз звіту завершено")
+            else:
+                self.log_message("Помилка парсингу файлу звіту")
+                self.update_status("Помилка парсингу")
             
         except Exception as e:
             self.log_message(f"Помилка під час аналізу: {e}")
             self.update_status("Помилка аналізу")
-    
-    def _parse_report_file(self):
-        """Парсинг файлу звіту"""
-        try:
-            with open(self.report_file_var.get(), 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Спочатку спробуємо старий формат зі статусами
-            file_pattern = r'\s*(.+?)\s+\[(.+?)\]'
-            matches = re.findall(file_pattern, content)
-            
-            # Перевіряємо, чи це справді старий формат (має бути багато збігів з абсолютними шляхами)
-            valid_matches = []
-            if matches:
-                for file_path, status in matches:
-                    file_path = file_path.strip()
-                    if os.path.isabs(file_path):
-                        valid_matches.append((file_path, status))
-            
-            if valid_matches and len(valid_matches) > 5:  # Якщо знайдено багато валідних файлів
-                # Старий формат After Effects звіту
-                total_matches = len(valid_matches)
-                for i, (file_path, status) in enumerate(valid_matches):
-                    if status.lower() in ['missing', 'відсутній']:
-                        self.files_to_process.append({
-                            'path': file_path,
-                            'status': status,
-                            'size': 0
-                        })
-                    
-                    # Оновлення прогресу
-                    progress = (i + 1) / total_matches * 50
-                    self.update_progress(progress)
-                
-                self.log_message(f"Знайдено {len(self.files_to_process)} відсутніх файлів (старий формат)")
-            else:
-                # Новий формат - простий список файлів
-                lines = content.strip().split('\n')
-                total_lines = len(lines)
-                
-                for i, line in enumerate(lines):
-                    line = line.strip()
-                    if line and os.path.isabs(line):
-                        # Перевіряємо, чи файл існує
-                        if os.path.exists(line):
-                            file_size = os.path.getsize(line)
-                            status = 'exists'
-                        else:
-                            file_size = 0
-                            status = 'missing'
-                        
-                        self.files_to_process.append({
-                            'path': line,
-                            'status': status,
-                            'size': file_size
-                        })
-                    
-                    # Оновлення прогресу
-                    progress = (i + 1) / total_lines * 50
-                    self.update_progress(progress)
-                
-                self.log_message(f"Знайдено {len(self.files_to_process)} файлів (новий формат)")
-            
-            # Пошук секвенцій
-            if self.process_sequences.get():
-                self._find_sequences()
-            
-        except Exception as e:
-            self.log_message(f"Помилка парсингу файлу: {e}")
-            raise
-    
-    def _find_sequences(self):
-        """Пошук секвенцій файлів"""
-        sequence_folders = set()
-        
-        for file_info in self.files_to_process:
-            folder = os.path.dirname(file_info['path'])
-            filename = os.path.basename(file_info['path'])
-            
-            # Перевірка на секвенцію (наприклад, file_001.jpg)
-            sequence_pattern = r'(.+?)_(\d+)\.(\w+)$'
-            match = re.match(sequence_pattern, filename)
-            
-            if match:
-                base_name, number, extension = match.groups()
-                sequence_key = f"{folder}/{base_name}_*.{extension}"
-                sequence_folders.add(sequence_key)
-        
-        for sequence in sequence_folders:
-            self.sequences_to_process.append({
-                'pattern': sequence,
-                'folder': os.path.dirname(sequence),
-                'files': []
-            })
-    
-    def _apply_filters(self):
-        """Застосування фільтрів"""
-        # Парсинг виключених розширень
-        excluded_ext = set()
-        if self.extensions_var.get():
-            extensions = self.extensions_var.get().split(',')
-            excluded_ext = {ext.strip().lower() for ext in extensions}
-        
-        # Фільтрація файлів
-        filtered_files = []
-        for file_info in self.files_to_process:
-            file_path = file_info['path']
-            
-            # Перевірка розширення
-            _, ext = os.path.splitext(file_path)
-            if ext.lower() in excluded_ext:
-                continue
-            
-            # Перевірка розміру файлу (якщо файл існує)
-            if os.path.exists(file_path):
-                size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                file_info['size'] = size_mb
-                
-                min_size = self.min_file_size.get()
-                max_size = self.max_file_size.get()
-                
-                if min_size > 0 and size_mb < min_size:
-                    continue
-                
-                if max_size > 0 and size_mb > max_size:
-                    continue
-            
-            filtered_files.append(file_info)
-        
-        self.files_to_process = filtered_files
-        self.log_message(f"Після фільтрації залишилось {len(self.files_to_process)} файлів")
     
     def _show_analysis_results(self):
         """Показ результатів аналізу"""
@@ -509,15 +425,29 @@ class AECleanupGUI:
         self.log_message(f"Загальний розмір: {total_size:.2f} MB")
         self.log_message("=" * 30)
         
-        # Показ перших 10 файлів як приклад
+        # Показ секвенцій
+        if self.sequences_to_process:
+            self.log_message("ЗНАЙДЕНІ СЕКВЕНЦІЇ:")
+            for i, seq_info in enumerate(self.sequences_to_process):
+                self.log_message(f"  {i+1}. {seq_info['name']}")
+                self.log_message(f"      Папка: {seq_info['folder']}")
+                self.log_message(f"      Кадри: {seq_info['start_frame']}-{seq_info['end_frame']} ({seq_info['file_count']} файлів)")
+                self.log_message(f"      Розширення: {seq_info['extension']}")
+                if seq_info['auxiliary_count'] > 0:
+                    self.log_message(f"      Допоміжних файлів: {seq_info['auxiliary_count']}")
+                self.log_message("")
+        
+        # Показ файлів (обмежуємо до 20 для читабельності)
         if self.files_to_process:
-            self.log_message("Приклади файлів для обробки:")
-            for i, file_info in enumerate(self.files_to_process[:10]):
+            self.log_message("ФАЙЛИ ДЛЯ ОБРОБКИ:")
+            display_limit = min(20, len(self.files_to_process))
+            for i, file_info in enumerate(self.files_to_process[:display_limit]):
                 size_info = f" ({file_info['size']:.2f} MB)" if file_info['size'] > 0 else ""
-                self.log_message(f"  {i+1}. {file_info['path']}{size_info}")
+                status_info = f" [{file_info['status']}]" if file_info['status'] != 'exists' else ""
+                self.log_message(f"  {i+1}. {file_info['path']}{size_info}{status_info}")
             
-            if len(self.files_to_process) > 10:
-                self.log_message(f"  ... та ще {len(self.files_to_process) - 10} файлів")
+            if len(self.files_to_process) > display_limit:
+                self.log_message(f"  ... та ще {len(self.files_to_process) - display_limit} файлів")
     
     def execute_operation(self):
         """Виконання операції"""
@@ -554,70 +484,42 @@ class AECleanupGUI:
             target_folder = self.target_folder.get()
             dry_run = self.dry_run_mode.get()
             
-            processed_files = 0
-            errors = []
-            skipped = []
-            
-            # Створення резервного списку
-            backup_list = []
-            
-            total_operations = len(self.files_to_process) + len(self.sequences_to_process)
-            current_operation = 0
-            
-            # Обробка файлів
-            for file_info in self.files_to_process:
-                try:
-                    file_path = file_info['path']
-                    
-                    if not os.path.exists(file_path):
-                        skipped.append(f"Файл не існує: {file_path}")
-                        continue
-                    
-                    backup_list.append(file_path)
-                    
-                    if not dry_run:
-                        if operation == "delete":
-                            os.remove(file_path)
-                            self.log_message(f"Видалено: {file_path}")
-                        elif operation == "move":
-                            dest_path = os.path.join(target_folder, os.path.basename(file_path))
-                            shutil.move(file_path, dest_path)
-                            self.log_message(f"Переміщено: {file_path} -> {dest_path}")
-                    else:
-                        action = "буде видалено" if operation == "delete" else "буде переміщено"
-                        self.log_message(f"[ТЕСТ] {action}: {file_path}")
-                    
-                    processed_files += 1
-                    
-                except Exception as e:
-                    error_msg = f"Помилка обробки {file_path}: {e}"
-                    errors.append(error_msg)
-                    self.log_message(error_msg)
-                
-                current_operation += 1
-                progress = (current_operation / total_operations) * 100
+            # Використовуємо AECleanupCore для виконання операції
+            def progress_callback(progress):
                 self.update_progress(progress)
             
-            # Збереження резервного списку
-            if self.create_backup_list.get() and backup_list:
-                backup_filename = f"backup_list_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-                with open(backup_filename, 'w', encoding='utf-8') as f:
-                    for file_path in backup_list:
-                        f.write(f"{file_path}\n")
-                self.log_message(f"Резервний список збережено: {backup_filename}")
+            # Виконуємо операцію через AECleanupCore
+            results = self.cleanup_core.execute_operation(
+                operation=operation,
+                target_folder=target_folder,
+                dry_run=dry_run,
+                progress_callback=progress_callback
+            )
             
             # Показ результатів
             self.log_message("=== РЕЗУЛЬТАТИ ОПЕРАЦІЇ ===")
-            self.log_message(f"Оброблено файлів: {processed_files}")
-            self.log_message(f"Помилок: {len(errors)}")
-            self.log_message(f"Пропущено: {len(skipped)}")
+            self.log_message(f"Оброблено файлів: {results['processed_files']}")
+            self.log_message(f"Оброблено секвенцій: {results['processed_sequences']}")
+            self.log_message(f"Помилок: {len(results['errors'])}")
+            self.log_message(f"Пропущено: {len(results['skipped'])}")
+            self.log_message(f"Загальний розмір: {results['total_size_processed']:.2f} MB")
             
-            if errors:
+            if results['backup_list_path']:
+                self.log_message(f"Резервний список збережено: {results['backup_list_path']}")
+            
+            if results['errors']:
                 self.log_message("Помилки:")
-                for error in errors[:5]:  # Показуємо перші 5 помилок
+                for error in results['errors'][:5]:  # Показуємо перші 5 помилок
                     self.log_message(f"  {error}")
-                if len(errors) > 5:
-                    self.log_message(f"  ... та ще {len(errors) - 5} помилок")
+                if len(results['errors']) > 5:
+                    self.log_message(f"  ... та ще {len(results['errors']) - 5} помилок")
+            
+            if results['skipped']:
+                self.log_message("Пропущені файли:")
+                for skipped in results['skipped'][:5]:  # Показуємо перші 5 пропущених
+                    self.log_message(f"  {skipped}")
+                if len(results['skipped']) > 5:
+                    self.log_message(f"  ... та ще {len(results['skipped']) - 5} файлів")
             
             mode_text = "Тестовий режим" if dry_run else "Операція"
             self.update_status(f"{mode_text} завершено")

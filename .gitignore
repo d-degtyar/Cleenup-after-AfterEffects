@@ -36,6 +36,7 @@ ENV/
 logs/
 reports/
 backup_list_*.txt
+backup_list_*.json
 *Report*.txt
 test_*.py
 debug_*.py

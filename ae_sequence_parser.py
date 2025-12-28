@@ -155,7 +155,7 @@ class FileSequenceParser:
             return files
         
         # Генерація імен файлів на основі маски
-        if sequence_info.start_frame and sequence_info.end_frame:
+        if sequence_info.start_frame is not None and sequence_info.end_frame is not None:
             base_name = self._get_base_filename(sequence_info.name)
             
             for frame_num in range(sequence_info.start_frame, sequence_info.end_frame + 1):
