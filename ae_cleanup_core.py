@@ -9,12 +9,43 @@ import os
 import re
 import shutil
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 import logging
 
 from ae_sequence_parser import FileSequenceParser, SequenceInfo
+
+# Службові файли, через які папка не вважається "непорожньою"
+JUNK_FILE_NAMES = {'thumbs.db', '.ds_store', 'desktop.ini'}
+
+LOCKED_HINT = ("файл зайнятий іншою програмою (After Effects, Premiere, Провідник). "
+               "Закрийте її та запустіть ще раз")
+
+
+def is_locked_error(error: Exception) -> bool:
+    """Чи означає помилка, що файл тримає інша програма"""
+    text = str(error)
+    return (isinstance(error, PermissionError) or "[WinError 32]" in text
+            or "being used by another process" in text.lower())
+
+
+def is_after_effects_running() -> bool:
+    """Чи запущено After Effects: файли відкритого проєкту він тримає і їх не можна видалити"""
+    try:
+        if sys.platform.startswith("win"):
+            output = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq AfterFX.exe", "/NH"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout
+            return "afterfx.exe" in output.lower()
+        result = subprocess.run(["pgrep", "-f", "After Effects"], capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except Exception:
+        return False
 
 class FileInfo:
     """Інформація про файл для обробки"""
@@ -32,6 +63,8 @@ class AECleanupCore:
     def __init__(self, logger=None):
         self.logger = logger or logging.getLogger(__name__)
         self.sequence_parser = FileSequenceParser()
+        # Причина, з якої останній файл чи секвенцію пропущено (для звіту)
+        self._last_skip_reason = ""
         
         # Списки для обробки
         self.files_to_process: List[FileInfo] = []
@@ -280,7 +313,7 @@ class AECleanupCore:
                         results['processed_files'] += 1
                         results['total_size_processed'] += file_info.size
                     else:
-                        results['skipped'].append(file_info.path)
+                        results['skipped'].append(self._last_skip_reason or file_info.path)
                 
                 except Exception as e:
                     error_msg = f"Помилка обробки файлу {file_info.path}: {e}"
@@ -295,6 +328,8 @@ class AECleanupCore:
             # Обробка секвенцій
             for sequence in self.sequences_to_process:
                 try:
+                    # Розмір рахуємо ДО операції, поки кадри ще на місці
+                    size = self.sequence_size(sequence)
                     if operation == 'delete':
                         success = self._delete_sequence(sequence, dry_run)
                     elif operation == 'move':
@@ -304,11 +339,9 @@ class AECleanupCore:
                     
                     if success:
                         results['processed_sequences'] += 1
-                        # Додаємо розмір секвенції
-                        validation = self.sequence_parser.validate_sequence(sequence)
-                        results['total_size_processed'] += validation.get('total_size', 0)
+                        results['total_size_processed'] += size
                     else:
-                        results['skipped'].append(sequence.folder_path)
+                        results['skipped'].append(self._last_skip_reason or sequence.folder_path)
                 
                 except Exception as e:
                     error_msg = f"Помилка обробки секвенції {sequence.name}: {e}"
@@ -362,8 +395,16 @@ class AECleanupCore:
         self.logger.info(f"Створено резервний список: {backup_filename}")
         return backup_filename
     
+    def _skip(self, path: str, error) -> bool:
+        """Запам'ятовує, чому пропущено, і пише в журнал. Повертає False для зручності"""
+        reason = LOCKED_HINT if isinstance(error, Exception) and is_locked_error(error) else str(error)
+        self._last_skip_reason = f"{path} -> {reason}"
+        self.logger.warning(f"Пропущено: {self._last_skip_reason}")
+        return False
+
     def _delete_file(self, file_info: FileInfo, dry_run: bool) -> bool:
         """Видалення файлу"""
+        self._last_skip_reason = ""
         if dry_run:
             self.logger.info(f"[DRY RUN] Видалення файлу: {file_info.path}")
             return True
@@ -373,14 +414,25 @@ class AECleanupCore:
             self.logger.info(f"Видалено файл: {file_info.path}")
             return True
         except Exception as e:
-            self.logger.error(f"Помилка видалення файлу {file_info.path}: {e}")
-            return False
+            return self._skip(file_info.path, e)
+
+    @staticmethod
+    def _unique_path(target_path: str) -> str:
+        """file.ext -> file_1.ext -> file_2.ext ..., якщо такий файл уже є"""
+        if not os.path.exists(target_path):
+            return target_path
+        base, ext = os.path.splitext(target_path)
+        counter = 1
+        while os.path.exists(f"{base}_{counter}{ext}"):
+            counter += 1
+        return f"{base}_{counter}{ext}"
     
     def _move_file(self, file_info: FileInfo, target_folder: str, dry_run: bool) -> bool:
         """Переміщення файлу"""
+        self._last_skip_reason = ""
         if not target_folder:
             self.logger.error("Не вказано цільову папку для переміщення")
-            return False
+            return self._skip(file_info.path, "не вказано цільову папку")
         
         target_path = os.path.join(target_folder, file_info.name)
         
@@ -389,86 +441,120 @@ class AECleanupCore:
             return True
         
         try:
-            # Створюємо підпапки якщо потрібно
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
-            
-            # Якщо файл з таким іменем вже існує, додаємо суфікс
-            if os.path.exists(target_path):
-                base, ext = os.path.splitext(target_path)
-                counter = 1
-                while os.path.exists(f"{base}_{counter}{ext}"):
-                    counter += 1
-                target_path = f"{base}_{counter}{ext}"
-            
+            target_path = self._unique_path(target_path)
             shutil.move(file_info.path, target_path)
             self.logger.info(f"Переміщено файл: {file_info.path} -> {target_path}")
             return True
         except Exception as e:
-            self.logger.error(f"Помилка переміщення файлу {file_info.path}: {e}")
+            return self._skip(file_info.path, e)
+
+    def _sequence_members(self, sequence: SequenceInfo) -> List[str]:
+        """Кадри секвенції та її допоміжні файли - і нічого більше з тієї папки"""
+        frames = self.sequence_parser.get_sequence_files(sequence)
+        auxiliary = self.sequence_parser.get_auxiliary_files(sequence)
+        return frames + [a for a in auxiliary if a not in frames]
+
+    def sequence_size(self, sequence: SequenceInfo) -> int:
+        """Розмір кадрів секвенції в байтах"""
+        size = 0
+        for path in self.sequence_parser.get_sequence_files(sequence):
+            try:
+                size += os.path.getsize(path)
+            except OSError:
+                pass
+        return size
+
+    @staticmethod
+    def _remove_item(path: str) -> None:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+
+    def _remove_dir_if_empty(self, folder: str) -> bool:
+        """Видаляє папку, лише якщо в ній не лишилося нічого, крім службових файлів"""
+        try:
+            items = os.listdir(folder)
+        except OSError:
             return False
-    
+        if any(name.lower() not in JUNK_FILE_NAMES for name in items):
+            return False
+        try:
+            for name in items:
+                os.remove(os.path.join(folder, name))
+            os.rmdir(folder)
+            self.logger.info(f"Видалено порожню папку: {folder}")
+            return True
+        except OSError as e:
+            self.logger.warning(f"Не вдалося видалити порожню папку {folder}: {e}")
+            return False
+
     def _delete_sequence(self, sequence: SequenceInfo, dry_run: bool) -> bool:
-        """Видалення секвенції файлів (видалення цілої папки)"""
+        """
+        Видаляє кадри секвенції та її допоміжні файли.
+        Інші файли в папці не чіпаються; сама папка видаляється, лише якщо стала порожньою.
+        """
+        self._last_skip_reason = ""
         folder_path = Path(sequence.folder_path)
+        members = self._sequence_members(sequence)
         
         if dry_run:
-            self.logger.info(f"[DRY RUN] Видалення папки секвенції: {folder_path}")
+            self.logger.info(f"[DRY RUN] Видалення {len(members)} файлів секвенції: {folder_path}")
             return True
         
-        try:
-            if not folder_path.exists():
-                self.logger.warning(f"Папка секвенції не існує: {folder_path}")
-                return False
-            
-            # Видаляємо всю папку з усім вмістом
-            shutil.rmtree(folder_path)
-            self.logger.info(f"Видалено папку секвенції: {folder_path}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Помилка видалення папки секвенції {sequence.name}: {e}")
-            return False
+        if not folder_path.exists():
+            return self._skip(str(folder_path), "папка секвенції не існує")
+        if not members:
+            return self._skip(str(folder_path), "у папці не знайдено кадрів секвенції")
+
+        failed = None
+        for path in members:
+            try:
+                self._remove_item(path)
+            except Exception as e:
+                failed = failed or e
+        self._remove_dir_if_empty(str(folder_path))
+        if failed:
+            return self._skip(str(folder_path), failed)
+        self.logger.info(f"Видалено {len(members)} файлів секвенції: {folder_path}")
+        return True
     
     def _move_sequence(self, sequence: SequenceInfo, target_folder: str, dry_run: bool) -> bool:
-        """Переміщення секвенції файлів (переміщення цілої папки)"""
+        """Переміщує кадри секвенції у <цільова папка>/<назва папки секвенції>"""
+        self._last_skip_reason = ""
         if not target_folder:
             self.logger.error("Не вказано цільову папку для переміщення")
-            return False
+            return self._skip(sequence.folder_path, "не вказано цільову папку")
         
         source_folder = Path(sequence.folder_path)
-        dest_path = Path(target_folder)
+        dest_sequence_folder = Path(target_folder) / source_folder.name
         
         if dry_run:
-            self.logger.info(f"[DRY RUN] Переміщення папки секвенції: {source_folder} -> {dest_path}")
+            self.logger.info(f"[DRY RUN] Переміщення секвенції: {source_folder} -> {dest_sequence_folder}")
             return True
         
+        if not source_folder.exists():
+            return self._skip(str(source_folder), "папка секвенції не існує")
+        members = self._sequence_members(sequence)
+        if not members:
+            return self._skip(str(source_folder), "у папці не знайдено кадрів секвенції")
+
+        failed = None
         try:
-            if not source_folder.exists():
-                self.logger.warning(f"Папка секвенції не існує: {source_folder}")
-                return False
-            
-            # Створюємо папку призначення якщо не існує
-            dest_path.mkdir(parents=True, exist_ok=True)
-            
-            # Визначаємо шлях для переміщеної папки
-            dest_sequence_folder = dest_path / source_folder.name
-            
-            # Якщо папка з таким ім'ям вже існує в місці призначення
-            if dest_sequence_folder.exists():
-                # Створюємо унікальне ім'я
-                counter = 1
-                while dest_sequence_folder.exists():
-                    dest_sequence_folder = dest_path / f"{source_folder.name}_{counter}"
-                    counter += 1
-            
-            # Переміщуємо всю папку
-            shutil.move(str(source_folder), str(dest_sequence_folder))
-            self.logger.info(f"Переміщено папку секвенції: {source_folder} -> {dest_sequence_folder}")
-            return True
-            
+            dest_sequence_folder.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            self.logger.error(f"Помилка переміщення папки секвенції {sequence.name}: {e}")
-            return False
+            return self._skip(str(source_folder), e)
+        for path in members:
+            try:
+                shutil.move(path, self._unique_path(str(dest_sequence_folder / Path(path).name)))
+            except Exception as e:
+                failed = failed or e
+        self._remove_dir_if_empty(str(source_folder))
+        if failed:
+            return self._skip(str(source_folder), failed)
+        self.logger.info(f"Переміщено секвенцію: {source_folder} -> {dest_sequence_folder}")
+        return True
     
     def get_summary(self) -> Dict:
         """Отримання підсумкової інформації"""
