@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Імпорт наших модулів
-from ae_cleanup_core import AECleanupCore
+from ae_cleanup_core import AECleanupCore, is_after_effects_running
 from ae_report_generator import AEReportGenerator
 
 class AECleanupGUI:
@@ -463,10 +463,20 @@ class AECleanupGUI:
         
         # Підтвердження операції
         if not self.dry_run_mode.get():
+            # Відкритий After Effects тримає файли проєкту, і їх не вдасться видалити чи перемістити
+            if is_after_effects_running() and not messagebox.askyesno(
+                "After Effects відкрито",
+                "After Effects зараз запущено. Файли, які використовує відкритий проєкт, "
+                "він тримає, тож їх буде пропущено.\n\n"
+                "Краще закрити After Effects і запустити ще раз.\n\nПродовжити все одно?",
+                icon="warning"
+            ):
+                return
             operation_text = "видалити" if operation == "delete" else "перемістити"
             result = messagebox.askyesno(
                 "Підтвердження",
-                f"Ви впевнені, що хочете {operation_text} {len(self.files_to_process)} файлів?\n\n"
+                f"Ви впевнені, що хочете {operation_text} файлів: {len(self.files_to_process)}, "
+                f"секвенцій: {len(self.sequences_to_process)}?\n\n"
                 f"Ця операція незворотна!",
                 icon="warning"
             )
@@ -502,7 +512,7 @@ class AECleanupGUI:
             self.log_message(f"Оброблено секвенцій: {results['processed_sequences']}")
             self.log_message(f"Помилок: {len(results['errors'])}")
             self.log_message(f"Пропущено: {len(results['skipped'])}")
-            self.log_message(f"Загальний розмір: {results['total_size_processed']:.2f} MB")
+            self.log_message(f"Загальний розмір: {results['total_size_processed'] / (1024 * 1024):.2f} MB")
             
             if results['backup_list_path']:
                 self.log_message(f"Резервний список збережено: {results['backup_list_path']}")
@@ -515,7 +525,7 @@ class AECleanupGUI:
                     self.log_message(f"  ... та ще {len(results['errors']) - 5} помилок")
             
             if results['skipped']:
-                self.log_message("Пропущені файли:")
+                self.log_message("Пропущені файли (причина після «->»):")
                 for skipped in results['skipped'][:5]:  # Показуємо перші 5 пропущених
                     self.log_message(f"  {skipped}")
                 if len(results['skipped']) > 5:

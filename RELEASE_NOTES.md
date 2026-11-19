@@ -1,5 +1,22 @@
 # Release Notes - After Effects Project Cleanup Tool
 
+## Version 1.0.1 - Safety fix
+
+### Fixed
+- **Sequences no longer take unrelated files with them.** Deleting a sequence removed its whole
+  folder, and moving one moved the whole folder, including any other files that lived there.
+  Now only the sequence frames (and their auxiliary files) are deleted or moved; the folder is
+  removed only if it is left empty.
+- The processed size of sequences was reported as 0 after a real delete, and the total size was
+  shown in bytes labelled as MB.
+- The confirmation dialog counted only single files, not sequences.
+
+### Added
+- A warning before a real run when After Effects is open: the files an open project uses are
+  locked and would be skipped.
+- Skipped files now show the reason, including "used by another program" for locked files.
+- Tests for the sequence handling (`python -m pytest tests`).
+
 ## Version 1.0.0 - Initial Release
 
 ### 🎉 New Features
